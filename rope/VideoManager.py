@@ -3,6 +3,7 @@ import cv2
 import tkinter as tk
 from PIL import Image, ImageTk
 import threading
+from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 import time
 import numpy as np
@@ -107,6 +108,15 @@ class VideoManager():
         self.perf_test = False
 
         self.control = []
+
+        # Asynchronous pipeline
+        self.decode_queue = Queue()
+        self.process_queue = Queue()
+        self.encode_queue = Queue()
+        self.pipeline_threads = []
+        self.pipeline_stop_event = threading.Event()
+        self.pending_out_frames = {}
+        self.next_out_frame = 0
 
         self.process_q =    {
                             "Thread":                   [],
@@ -344,24 +354,91 @@ class VideoManager():
                     index=idx
         return index, min_frame
 
+    # ---------------- Asynchronous pipeline helpers ----------------
+    def start_pipeline(self):
+        if self.pipeline_threads:
+            return
+        self.pipeline_stop_event.clear()
+        self.pending_out_frames = {}
+        self.next_out_frame = self.current_frame
+        self.decode_thread = threading.Thread(target=self._decode_worker, daemon=True)
+        self.process_thread = threading.Thread(target=self._process_worker, daemon=True)
+        self.encode_thread = threading.Thread(target=self._encode_worker, daemon=True)
+        self.pipeline_threads = [self.decode_thread, self.process_thread, self.encode_thread]
+        for t in self.pipeline_threads:
+            t.start()
+
+    def stop_pipeline(self):
+        if not self.pipeline_threads:
+            return
+        self.pipeline_stop_event.set()
+        self.decode_queue.put((None, None))
+        self.process_queue.put((None, None))
+        self.encode_queue.put((None, None))
+        for t in self.pipeline_threads:
+            t.join()
+        self.pipeline_threads = []
+
+    def _decode_worker(self):
+        while not self.pipeline_stop_event.is_set():
+            if not self.play or not self.is_video_loaded:
+                time.sleep(0.01)
+                continue
+            if self.current_frame >= self.video_frame_total:
+                break
+            with lock:
+                success, target_image = self.capture.read()
+            if not success:
+                break
+            target_image = cv2.cvtColor(target_image, cv2.COLOR_BGR2RGB)
+            self.decode_queue.put((self.current_frame, target_image))
+            self.current_frame += 1
+        self.decode_queue.put((None, None))
+
+    def _process_worker(self):
+        while True:
+            frame_number, frame = self.decode_queue.get()
+            if frame_number is None:
+                break
+            if not self.control['SwapFacesButton'] and not self.control['EditFacesButton']:
+                processed = frame
+            else:
+                processed = self.swap_video(frame, frame_number, True)
+            if self.control['EnhanceFrameButton']:
+                processed = self.enhance_video(processed, frame_number, True)
+            self.process_queue.put((frame_number, processed))
+            self.decode_queue.task_done()
+        self.process_queue.put((None, None))
+
+    def _encode_worker(self):
+        while True:
+            frame_number, frame = self.process_queue.get()
+            if frame_number is None:
+                break
+            self.pending_out_frames[frame_number] = frame
+            while self.next_out_frame in self.pending_out_frames:
+                image = self.pending_out_frames.pop(self.next_out_frame)
+                temp = [image, self.next_out_frame]
+                self.frame_q.append(temp)
+                if self.control['VirtualCameraSwitch'] and self.virtcam:
+                    try:
+                        self.virtcam.send(image)
+                        self.virtcam.sleep_until_next_frame()
+                    except Exception as e:
+                        print(e)
+                self.next_out_frame += 1
+            self.process_queue.task_done()
+
     def play_video(self, command):
         # print(inspect.currentframe().f_back.f_code.co_name, '->play_video: ')
         if command == "play":
             # Initialization
             self.play = True
             self.fps_average = []
-            self.process_qs = []
             self.capture.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
             self.frame_timer = time.time()
 
-            if self.executor:
-                self.executor.shutdown(wait=True)
-            self.executor = ThreadPoolExecutor(max_workers=self.parameters['ThreadsSlider'])
-
-            # Create reusable queue based on number of threads
-            for i in range(self.parameters['ThreadsSlider']):
-                    new_process_q = self.process_q.copy()
-                    self.process_qs.append(new_process_q)
+            self.start_pipeline()
 
             # Start up audio if requested
             if self.control['AudioButton']:
@@ -397,34 +474,14 @@ class VideoManager():
         elif command == "stop":
             self.play = False
             self.add_action("stop_play", True)
-
-            index, min_frame = self.find_lowest_frame(self.process_qs)
-
-            if index != -1:
-                self.current_frame = min_frame-1
-
+            self.stop_pipeline()
             self.terminate_audio_process_tree()
-
-            if self.executor:
-                self.executor.shutdown(wait=True)
-                self.executor = None
-
             torch.cuda.empty_cache()
 
         elif command=='stop_from_gui':
             self.play = False
-
-            # Find the lowest frame in the current render queue and set the current frame to the one before it
-            index, min_frame = self.find_lowest_frame(self.process_qs)
-            if index != -1:
-                self.current_frame = min_frame-1
-
+            self.stop_pipeline()
             self.terminate_audio_process_tree()
-
-            if self.executor:
-                self.executor.shutdown(wait=True)
-                self.executor = None
-
             torch.cuda.empty_cache()
 
         elif command == "record":
@@ -506,6 +563,9 @@ class VideoManager():
 
     # @profile
     def process(self):
+        if self.pipeline_threads:
+            return
+
         process_qs_len = range(len(self.process_qs))
 
         # Add threads to Queue

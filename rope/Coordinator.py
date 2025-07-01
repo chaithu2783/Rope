@@ -13,6 +13,7 @@ mem_delay = 1
 
 def quit_app():
     vm.terminate_audio_process_tree()
+    vm.stop_pipeline()
     gui.destroy()
 
 # @profile
