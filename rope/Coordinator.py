@@ -12,7 +12,7 @@ resize_delay = 1
 mem_delay = 1
 
 def quit_app():
-    vm.terminate_audio_process_tree()
+    vm.cleanup()
     gui.destroy()
 
 # @profile
