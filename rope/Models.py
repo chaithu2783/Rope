@@ -40,7 +40,9 @@ class Models():
         self.provider_name = 'CUDA'
         self.device = device
         self.trt_ep_options = {
-            'trt_max_workspace_size': 3 << 30,  # Dimensione massima dello spazio di lavoro in bytes
+            # Aumenta il workspace di TensorRT a 8 GB per consentire
+            # build più ottimizzate quando si utilizzano GPU con ampia VRAM
+            'trt_max_workspace_size': 8 << 30,
             'trt_engine_cache_enable': True,
             'trt_engine_cache_path': "tensorrt-engines",
             'trt_timing_cache_enable': True,
