@@ -491,7 +491,9 @@ class VideoManager():
         if self.play == True and self.is_video_loaded == True:
             for item in self.process_qs:
                 if item['Status'] == 'clear' and self.current_frame < self.video_frame_total:
-                    item['Thread'] = threading.Thread(target=self.thread_video_read, args = [self.current_frame]).start()
+                    thread = threading.Thread(target=self.thread_video_read, args=[self.current_frame])
+                    thread.start()
+                    item['Thread'] = thread
                     item['FrameNumber'] = self.current_frame
                     item['Status'] = 'started'
                     item['ThreadTime'] = time.time()
