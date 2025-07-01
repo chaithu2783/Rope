@@ -185,7 +185,12 @@ class TensorRTPredictor:
             self.adjust_buffer(feed_dict, context)
 
             for name, tensor in self.tensors.items():
-                assert tensor.dtype == torch.float32, f"Tensor '{name}' should be torch.float32 but is {tensor.dtype}"
+                # Gli engine possono essere generati in FP16 o FP32. Consenti
+                # entrambe le opzioni verificando che il tensore sia in uno dei
+                # due formati supportati.
+                assert tensor.dtype in (torch.float32, torch.float16), (
+                    f"Tensor '{name}' should be fp32 or fp16 but is {tensor.dtype}"
+                )
                 context.set_tensor_address(name, tensor.data_ptr())
 
             nvtx.range_pop()
@@ -224,7 +229,10 @@ class TensorRTPredictor:
             self.adjust_buffer(feed_dict, context)
 
             for name, tensor in self.tensors.items():
-                assert tensor.dtype == torch.float32, f"Tensor '{name}' should be torch.float32 but is {tensor.dtype}"
+                # Supporta motori in FP16 o FP32 senza forzare un formato unico
+                assert tensor.dtype in (torch.float32, torch.float16), (
+                    f"Tensor '{name}' should be fp32 or fp16 but is {tensor.dtype}"
+                )
                 context.set_tensor_address(name, tensor.data_ptr())
 
             nvtx.range_pop()

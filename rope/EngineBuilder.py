@@ -43,8 +43,13 @@ class EngineBuilder:
         # Costruisce il builder di TensorRT e la configurazione usando lo stesso logger
         self.builder = trt.Builder(TRT_LOGGER)
         self.config = self.builder.create_builder_config()
-        # Imposta il limite di memoria del pool di lavoro a 3 GB
-        self.config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 3 * (2 ** 30))  # 3 GB
+        # Imposta il limite di memoria del pool di lavoro a 8 GB
+        # Un workspace più ampio consente una maggiore libertà al motore di
+        # ottimizzare l'esecuzione, specialmente su GPU con molta memoria come
+        # la RTX 4090
+        self.config.set_memory_pool_limit(
+            trt.MemoryPoolType.WORKSPACE, 8 * (2 ** 30)
+        )  # 8 GB
 
         # Crea un profilo di ottimizzazione, se necessario
         profile = self.builder.create_optimization_profile()
