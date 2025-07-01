@@ -3,6 +3,7 @@ import cv2
 import tkinter as tk
 from PIL import Image, ImageTk
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import numpy as np
 from skimage import transform as trans
@@ -70,6 +71,10 @@ class VideoManager():
         # self.source_embedding = []          # array with indexed source embeddings
 
         self.found_faces = []   # array that maps the found faces to source faces
+
+        # Thread synchronization
+        self.process_lock = threading.Lock()
+        self.executor = None
 
         self.parameters = []
 
@@ -349,6 +354,10 @@ class VideoManager():
             self.capture.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
             self.frame_timer = time.time()
 
+            if self.executor:
+                self.executor.shutdown(wait=True)
+            self.executor = ThreadPoolExecutor(max_workers=self.parameters['ThreadsSlider'])
+
             # Create reusable queue based on number of threads
             for i in range(self.parameters['ThreadsSlider']):
                     new_process_q = self.process_q.copy()
@@ -396,6 +405,10 @@ class VideoManager():
 
             self.terminate_audio_process_tree()
 
+            if self.executor:
+                self.executor.shutdown(wait=True)
+                self.executor = None
+
             torch.cuda.empty_cache()
 
         elif command=='stop_from_gui':
@@ -408,6 +421,10 @@ class VideoManager():
 
             self.terminate_audio_process_tree()
 
+            if self.executor:
+                self.executor.shutdown(wait=True)
+                self.executor = None
+
             torch.cuda.empty_cache()
 
         elif command == "record":
@@ -416,6 +433,10 @@ class VideoManager():
             self.total_thread_time = 0.0
             self.process_qs = []
             self.capture.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
+
+            if self.executor:
+                self.executor.shutdown(wait=True)
+            self.executor = ThreadPoolExecutor(max_workers=self.parameters['ThreadsSlider'])
 
             for i in range(self.parameters['ThreadsSlider']):
                     new_process_q = self.process_q.copy()
@@ -488,14 +509,15 @@ class VideoManager():
         process_qs_len = range(len(self.process_qs))
 
         # Add threads to Queue
-        if self.play == True and self.is_video_loaded == True:
+        if self.play == True and self.is_video_loaded == True and self.executor:
             for item in self.process_qs:
                 if item['Status'] == 'clear' and self.current_frame < self.video_frame_total:
-                    item['Thread'] = threading.Thread(target=self.thread_video_read, args = [self.current_frame]).start()
-                    item['FrameNumber'] = self.current_frame
-                    item['Status'] = 'started'
-                    item['ThreadTime'] = time.time()
-
+                    future = self.executor.submit(self.thread_video_read, self.current_frame)
+                    with self.process_lock:
+                        item['FrameNumber'] = self.current_frame
+                        item['Status'] = 'started'
+                        item['ThreadTime'] = time.time()
+                        item['Thread'] = future
                     self.current_frame += 1
                     break
 
@@ -534,10 +556,11 @@ class VideoManager():
                     if self.process_qs[index]['FrameNumber'] >= self.video_frame_total-1 or self.process_qs[index]['FrameNumber'] == self.stop_marker:
                         self.play_video('stop')
 
-                    self.process_qs[index]['Status'] = 'clear'
-                    self.process_qs[index]['Thread'] = []
-                    self.process_qs[index]['FrameNumber'] = []
-                    self.process_qs[index]['ThreadTime'] = []
+                    with self.process_lock:
+                        self.process_qs[index]['Status'] = 'clear'
+                        self.process_qs[index]['Thread'] = []
+                        self.process_qs[index]['FrameNumber'] = []
+                        self.process_qs[index]['ThreadTime'] = []
                     self.frame_timer += 1.0/self.fps
 
         if not self.webcam_selected(self.video_file):
@@ -597,9 +620,10 @@ class VideoManager():
                             print(msg)
 
                         self.total_thread_time = []
-                        self.process_qs[index]['Status'] = 'clear'
-                        self.process_qs[index]['FrameNumber'] = []
-                        self.process_qs[index]['Thread'] = []
+                        with self.process_lock:
+                            self.process_qs[index]['Status'] = 'clear'
+                            self.process_qs[index]['FrameNumber'] = []
+                            self.process_qs[index]['Thread'] = []
                         self.frame_timer = time.time()
         else:
             self.record=False
@@ -621,12 +645,13 @@ class VideoManager():
             if self.control['EnhanceFrameButton']:
                 temp[0] = self.enhance_video(temp[0], frame_number, True)
 
-            for item in self.process_qs:
-                if item['FrameNumber'] == frame_number:
-                    item['ProcessedFrame'] = temp[0]
-                    item['Status'] = 'finished'
-                    item['ThreadTime'] = time.time() - item['ThreadTime']
-                    break
+            with self.process_lock:
+                for item in self.process_qs:
+                    if item['FrameNumber'] == frame_number:
+                        item['ProcessedFrame'] = temp[0]
+                        item['Status'] = 'finished'
+                        item['ThreadTime'] = time.time() - item['ThreadTime']
+                        break
 
     def enhance_video(self, target_image, frame_number, use_markers):
         # Grab a local copy of the parameters to prevent threading issues
