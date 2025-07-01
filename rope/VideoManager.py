@@ -129,6 +129,38 @@ class VideoManager():
         # Face Editor
         self.face_editor = []
 
+    def cleanup(self):
+        """Release resources and ensure all threads are closed."""
+        # Stop any ongoing playback which also joins worker threads
+        if self.play:
+            try:
+                self.play_video("stop")
+            except Exception:
+                pass
+
+        # Shut down thread pool if still active
+        if self.executor:
+            try:
+                self.executor.shutdown(wait=True)
+            finally:
+                self.executor = None
+
+        # Terminate any running audio process
+        self.terminate_audio_process_tree()
+
+        # Release video capture
+        if self.capture:
+            try:
+                self.capture.release()
+            finally:
+                self.capture = []
+
+        # Disable virtual camera if active
+        self.disable_virtualcam()
+
+    def __del__(self):
+        self.cleanup()
+
     def assign_found_faces(self, found_faces):
         self.found_faces = found_faces
 
