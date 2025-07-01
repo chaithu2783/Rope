@@ -560,6 +560,7 @@ class VideoManager():
                         self.process_qs[index]['Status'] = 'clear'
                         self.process_qs[index]['Thread'] = []
                         self.process_qs[index]['FrameNumber'] = []
+                        self.process_qs[index]['ProcessedFrame'] = []
                         self.process_qs[index]['ThreadTime'] = []
                     self.frame_timer += 1.0/self.fps
 
@@ -624,6 +625,7 @@ class VideoManager():
                             self.process_qs[index]['Status'] = 'clear'
                             self.process_qs[index]['FrameNumber'] = []
                             self.process_qs[index]['Thread'] = []
+                            self.process_qs[index]['ProcessedFrame'] = []
                         self.frame_timer = time.time()
         else:
             self.record=False
@@ -670,15 +672,16 @@ class VideoManager():
                 parameters = self.markers[idx-1]['parameters'].copy()
 
         # Load frame into VRAM
-        img = torch.from_numpy(target_image.astype('uint8')).to(self.models.device) #HxWxc
-        img = img.permute(2,0,1)#cxHxW
+        img_t = torch.from_numpy(target_image).to(self.models.device) #HxWxc
+        img_t = img_t.permute(2,0,1)#cxHxW
 
-        img = self.func_w_test("enhance_video", self.enhance_core, img, parameters)
+        img_t = self.func_w_test("enhance_video", self.enhance_core, img_t, parameters)
 
-        img = img.permute(1,2,0)
-        img = img.cpu().numpy()
+        img_np = img_t.permute(1,2,0).cpu().numpy()
+        del img_t
+        torch.cuda.empty_cache()
 
-        return img
+        return img_np
 
     def enhance_core(self, img, parameters):
         enhancer_type = parameters['FrameEnhancerTypeTextSel']
@@ -850,12 +853,12 @@ class VideoManager():
                 parameters = self.markers[idx-1]['parameters'].copy()
 
         # Load frame into VRAM
-        img = torch.from_numpy(target_image.astype('uint8')).to(self.models.device) #HxWxc
-        img = img.permute(2,0,1)#cxHxW
+        img_t = torch.from_numpy(target_image).to(self.models.device) #HxWxc
+        img_t = img_t.permute(2,0,1)#cxHxW
 
         #Scale up frame if it is smaller than 512
-        img_x = img.size()[2]
-        img_y = img.size()[1]
+        img_x = img_t.size()[2]
+        img_y = img_t.size()[1]
 
         det_scale = 1.0
         if img_x<512 and img_y<512:
@@ -867,27 +870,27 @@ class VideoManager():
                 new_height = 512
                 tscale = v2.Resize((new_height, int(512*img_x/img_y)), antialias=False)
 
-            img = tscale(img)
+            img_t = tscale(img_t)
 
             det_scale = torch.div(new_height, img_y)
 
         elif img_x<512:
             new_height = int(512*img_y/img_x)
             tscale = v2.Resize((new_height, 512), antialias=False)
-            img = tscale(img)
+            img_t = tscale(img_t)
 
             det_scale = torch.div(new_height, img_y)
 
         elif img_y<512:
             new_height = 512
             tscale = v2.Resize((new_height, int(512*img_x/img_y)), antialias=False)
-            img = tscale(img)
+            img_t = tscale(img_t)
 
             det_scale = torch.div(new_height, img_y)
 
         # Rotate the frame
         if parameters['OrientSwitch']:
-            img = v2.functional.rotate(img, angle=parameters['OrientSlider'], interpolation=v2.InterpolationMode.BILINEAR, expand=True)
+            img_t = v2.functional.rotate(img_t, angle=parameters['OrientSlider'], interpolation=v2.InterpolationMode.BILINEAR, expand=True)
 
         # Find all faces in frame and return a list of 5-pt kpss
         if parameters["AutoRotationSwitch"]:
@@ -907,7 +910,7 @@ class VideoManager():
             # force to use from_points in landmark detector when edit face is enabled.
             from_points = True
 
-        bboxes, kpss_5, kpss = self.func_w_test("detect", self.models.run_detect, img, parameters['DetectTypeTextSel'], max_num=20, score=parameters['DetectScoreSlider']/100.0, use_landmark_detection=use_landmark_detection, landmark_detect_mode=landmark_detect_mode, landmark_score=parameters["LandmarksDetectScoreSlider"]/100.0, from_points=from_points, rotation_angles=rotation_angles)
+        bboxes, kpss_5, kpss = self.func_w_test("detect", self.models.run_detect, img_t, parameters['DetectTypeTextSel'], max_num=20, score=parameters['DetectScoreSlider']/100.0, use_landmark_detection=use_landmark_detection, landmark_detect_mode=landmark_detect_mode, landmark_score=parameters["LandmarksDetectScoreSlider"]/100.0, from_points=from_points, rotation_angles=rotation_angles)
 
         # Set Max FaceID to FaceLandmarks and FaceEditor widgets
         if kpss_5 is not None and len(kpss_5) > 0:
@@ -970,27 +973,27 @@ class VideoManager():
                             s_e = found_face["AssignedEmbedding"]
                             # img_orig = torch.clone(img)
                             # s_e = found_face['ptrdata']
-                            img = self.func_w_test("swap_video", self.swap_core, img, fface[0], fface[1], s_e, fface[2], found_face.get('DFLModel', False), parameters, control)
+                            img_t = self.func_w_test("swap_video", self.swap_core, img_t, fface[0], fface[1], s_e, fface[2], found_face.get('DFLModel', False), parameters, control)
                             # img = img.permute(2,0,1)
 
                 if control['EditFacesButton']:
                     parameters_face_editor = self.face_editor.get_named_parameters(frame_number, i + 1)
                     # apply edit faces only if named parameters are not as default.
                     if not self.face_editor.are_named_parameters_default(parameters_face_editor):
-                        img = self.func_w_test("swap_video", self.swap_edit_face_core, img, fface[1], parameters, parameters_face_editor.copy(), control)
+                        img_t = self.func_w_test("swap_video", self.swap_edit_face_core, img_t, fface[1], parameters, parameters_face_editor.copy(), control)
 
-            img = img.permute(1,2,0)
+            img_t = img_t.permute(1,2,0)
             if not control['MaskViewButton'] and parameters['OrientSwitch']:
-                img = img.permute(2,0,1)
-                img = transforms.functional.rotate(img, angle=-parameters['OrientSlider'], expand=True)
-                img = img.permute(1,2,0)
+                img_t = img_t.permute(2,0,1)
+                img_t = transforms.functional.rotate(img_t, angle=-parameters['OrientSlider'], expand=True)
+                img_t = img_t.permute(1,2,0)
 
         else:
-            img = img.permute(1,2,0)
+            img_t = img_t.permute(1,2,0)
             if parameters['OrientSwitch']:
-                img = img.permute(2,0,1)
-                img = v2.functional.rotate(img, angle=-parameters['OrientSlider'], interpolation=v2.InterpolationMode.BILINEAR, expand=True)
-                img = img.permute(1,2,0)
+                img_t = img_t.permute(2,0,1)
+                img_t = v2.functional.rotate(img_t, angle=-parameters['OrientSlider'], interpolation=v2.InterpolationMode.BILINEAR, expand=True)
+                img_t = img_t.permute(1,2,0)
 
         if self.perf_test:
             print('------------------------')
@@ -998,11 +1001,13 @@ class VideoManager():
         # Unscale small videos
         if img_x <512 or img_y < 512:
             tscale = v2.Resize((img_y, img_x), antialias=False)
-            img = img.permute(2,0,1)
-            img = tscale(img)
-            img = img.permute(1,2,0)
+            img_t = img_t.permute(2,0,1)
+            img_t = tscale(img_t)
+            img_t = img_t.permute(1,2,0)
 
-        img = img.cpu().numpy()
+        img_np = img_t.cpu().numpy()
+        del img_t
+        torch.cuda.empty_cache()
 
         if parameters["ShowLandmarksSwitch"]:
             if ret:
@@ -1036,14 +1041,14 @@ class VideoManager():
                         for i in range(-1, p):
                             for j in range(-1, p):
                                 try:
-                                    img[int(kpoint[1])+i][int(kpoint[0])+j][0] = kcolor[0]
-                                    img[int(kpoint[1])+i][int(kpoint[0])+j][1] = kcolor[1]
-                                    img[int(kpoint[1])+i][int(kpoint[0])+j][2] = kcolor[2]
+                                    img_np[int(kpoint[1])+i][int(kpoint[0])+j][0] = kcolor[0]
+                                    img_np[int(kpoint[1])+i][int(kpoint[0])+j][1] = kcolor[1]
+                                    img_np[int(kpoint[1])+i][int(kpoint[0])+j][2] = kcolor[2]
                                 except:
                                     #print("Key-points value {} exceed the image size {}.".format(kpoint, (img_x, img_y)))
                                     continue
 
-        return img.astype(np.uint8)
+        return img_np.astype(np.uint8)
 
     def findCosineDistance(self, vector1, vector2):
         vector1 = vector1.ravel()
