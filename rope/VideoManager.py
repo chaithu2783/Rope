@@ -129,8 +129,16 @@ class VideoManager():
         # Face Editor
         self.face_editor = []
 
+        # Temporal smoothing
+        self.prev_kps = []
+        self.prev_swaps = []
+        self.smoothing_alpha = 0.7
+
     def assign_found_faces(self, found_faces):
         self.found_faces = found_faces
+        # reset temporal smoothing buffers
+        self.prev_kps = [None for _ in found_faces]
+        self.prev_swaps = [None for _ in found_faces]
 
     def enable_virtualcam(self):
         #Check if capture contains any cv2 stream or is it an empty list
@@ -962,16 +970,19 @@ class VideoManager():
             # Loop through target faces to see if they match our found face embeddings
             for i, fface in enumerate(ret):
                 if control['SwapFacesButton']:
-                    for found_face in self.found_faces:
-                        # sim between face in video and already found face
+                    for fid, found_face in enumerate(self.found_faces):
+                        # similarity between face in video and previously found face
                         sim = self.findCosineDistance(fface[2], found_face["Embedding"])
-                        # if the face[i] in the frame matches afound face[j] AND the found face is active (not [])
-                        if sim>=float(parameters["ThresholdSlider"]) and found_face["SourceFaceAssignments"]:
+                        if sim >= float(parameters["ThresholdSlider"]) and found_face["SourceFaceAssignments"]:
                             s_e = found_face["AssignedEmbedding"]
-                            # img_orig = torch.clone(img)
-                            # s_e = found_face['ptrdata']
-                            img = self.func_w_test("swap_video", self.swap_core, img, fface[0], fface[1], s_e, fface[2], found_face.get('DFLModel', False), parameters, control)
-                            # img = img.permute(2,0,1)
+                            # smooth landmarks
+                            if fid < len(self.prev_kps) and self.prev_kps[fid] is not None:
+                                sm_kps = self.smoothing_alpha * fface[0] + (1 - self.smoothing_alpha) * self.prev_kps[fid]
+                            else:
+                                sm_kps = fface[0]
+                            img = self.func_w_test("swap_video", self.swap_core, img, sm_kps, fface[1], s_e, fface[2], found_face.get('DFLModel', False), parameters, control, face_id=fid)
+                            self.prev_kps[fid] = sm_kps
+                            break
 
                 if control['EditFacesButton']:
                     parameters_face_editor = self.face_editor.get_named_parameters(frame_number, i + 1)
@@ -1066,7 +1077,7 @@ class VideoManager():
         return result
 
     # @profile
-    def swap_core(self, img, kps_5, kps, s_e, t_e, dfl_model, parameters, control): # img = RGB
+    def swap_core(self, img, kps_5, kps, s_e, t_e, dfl_model, parameters, control, face_id=None): # img = RGB
         swapper_model = parameters['FaceSwapperModelTextSel']
 
         if dfl_model:
@@ -1424,6 +1435,9 @@ class VideoManager():
             swap = faceutil.jpegBlur(swap, parameters["JpegCompressionSlider"])
 
         swap = torch.mul(swap, swap_mask)
+
+        # Temporal smoothing
+        swap, swap_mask = self._apply_temporal_smoothing(face_id, swap, swap_mask)
 
         if not control['MaskViewButton'] and not control['CompareViewButton']:
             # Cslculate the area to be mergerd back to the original frame
@@ -2057,3 +2071,23 @@ class VideoManager():
         extract_and_blend_eye(right_eye, radius_x, radius_y, img_orig, img_swap, blend_alpha, feather_radius)
 
         return img_swap
+
+    def _apply_temporal_smoothing(self, face_id, swap, swap_mask):
+        """Blend current swap with previous frames for smoother results."""
+        if face_id is None:
+            return swap, swap_mask
+        # ensure buffer length
+        if face_id >= len(self.prev_swaps):
+            self.prev_swaps.extend([None] * (face_id + 1 - len(self.prev_swaps)))
+            self.prev_kps.extend([None] * (face_id + 1 - len(self.prev_kps)))
+
+        prev = self.prev_swaps[face_id]
+        if prev is not None:
+            prev_swap, prev_mask = prev
+            alpha = self.smoothing_alpha
+            swap = swap * alpha + prev_swap * (1 - alpha)
+            swap_mask = swap_mask * alpha + prev_mask * (1 - alpha)
+
+        # store current for next frame
+        self.prev_swaps[face_id] = (swap.clone(), swap_mask.clone())
+        return swap, swap_mask
